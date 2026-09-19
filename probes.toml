@@ -1,0 +1,1558 @@
+# ohos-preflight 探针元数据 — 新增探针只需在此添加一条 [[probes]]
+# 维护此文件而非 Python 代码中的硬编码字典
+
+[status_labels]
+pass = "通过"
+fail = "失败"
+unsupported = "不适用"
+
+[reason_hints]
+"Permission denied" = "权限不足"
+"Operation not permitted" = "操作被禁止"
+"Function not implemented" = "内核未实现该调用"
+"Invalid argument" = "参数无效（内核不支持）"
+"No such file or directory" = "路径不存在或无法访问"
+"not writable" = "目录不可写"
+"not executable" = "路径不可执行"
+"not set" = "未配置"
+"not found" = "未找到"
+"no writable directory found" = "无可写目录"
+"Symbol not found" = "libc 中不存在该符号"
+"core dumped" = "进程崩溃 (SIGSYS)"
+"is a no-op stub" = "函数为空实现桩"
+"did not load" = "动态库未加载"
+"not in libc" = "libc 中不存在"
+"not in PATH" = "工具链未安装"
+"produced" = "行为与预期不符"
+"SIGSYS" = "被 seccomp 沙箱拦截（SIGSYS）"
+"not implemented" = "内核未实现该接口"
+
+[category.A]
+name = "内核能力"
+detail = "seccomp / ptrace / rseq / pidfd_open / close_range / bpf / landlock / userfaultfd / perf_event"
+
+[category.B]
+name = "动态链接器"
+detail = "LD_PRELOAD / dlsym(RTLD_NEXT/RTLD_DEFAULT) / dlopen / naked_asm"
+
+[category.C]
+name = "系统调用 (raw syscall)"
+detail = "raw syscall: statx / renameat2 / openat2 / clone3 / getrandom / futex / epoll / preadv2 / getdents64 等 15 项"
+
+[category.D]
+name = "文件与内存"
+detail = "POSIX shm / memfd / mmap(MAP_SHARED) / copy_file_range"
+
+[category.E]
+name = "IPC / 事件通知"
+detail = "socketpair / SCM_RIGHTS / eventfd / signalfd / epoll / fanotify"
+
+[category.F]
+name = "进程信息"
+detail = "/proc/self / prctl(PR_GET_NAME)"
+
+[category.G]
+name = "文件系统与符号"
+detail = "tmpfile / dladdr / emulated TLS"
+
+[category.H]
+name = "扩展 libc 函数"
+detail = "pthread_cancel / program_invocation_name / _res / getusershell / getpass"
+
+[category.I]
+name = "集成与环境"
+detail = "HMDFS / sendfile / posix_spawn / pty / /dev/fd / /data/local/tmp / linux 宏"
+
+[category.J]
+name = "替代方案验证"
+detail = "needs_relax 探针的 fallback solution_code 双轨验证（J = needs_relax 项的替代实现是否真的可用）"
+
+[category.K]
+name = "降级点回归"
+detail = "ohos-bun (ohos-aarch64 分支) / ohos-compat-shim 里已知的能力型降级点逐条回归检查；每条对应一处具体的 #[cfg(target_env = \"ohos\")] 代码或等价降级，pass 意味着对应降级可能已经可以撤销"
+
+[[probes]]
+id = "a1_seccomp_unotify"
+category = "A"
+desc = "seccomp 用户态通知 (SECCOMP_IOCTL_NOTIF_RECV)"
+bun = false
+vite_plus = true
+solution = "向 HarmonyOS 团队申请放行 seccomp 能力；libc 层调用审计可用 LD_PRELOAD shim 替代（拦截 libc 函数 + RTLD_NEXT 转发，无法拦截 raw syscall）"
+priority = "P1"
+fallback_probe = "j13_seccomp_shim_fb"
+impact = "seccomp 用户态通知机制用于实现用户空间 syscall 拦截（调试器、沙箱、profiler）。HarmonyOS 拒绝 SECCOMP_SET_MODE_FILTER，调试工具链（如 strace 替代品、Node inspector）无法工作。"
+trigger_path = """
+调试工具 (strace / seccomp sandbox)
+  → seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER)
+    → 返回 EINVAL（参数无效 / 沙箱禁止）
+
+vite-plus fspy 系统调用拦截:
+  → vite-task/crates/fspy_seccomp_unotify — seccomp 用户态通知
+  → seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER)
+  → seccompiler (rust-vmm/seccompiler) — BPF filter 编译"""
+solution_file = "solutions/a1_seccomp_unotify.c"
+
+[[probes]]
+id = "a2_no_new_privs"
+category = "A"
+desc = "prctl(PR_SET_NO_NEW_PRIVS) 禁止提权"
+bun = false
+
+[[probes]]
+id = "a3_ptrace"
+category = "A"
+desc = "ptrace(PTRACE_TRACEME) 进程跟踪"
+bun = false
+solution = "向 HarmonyOS 团队申请 ptrace 权限；调试场景可申请调试模式签名"
+priority = "P2"
+fallback_probe = "j1_ptrace_fb"
+impact = "ptrace 是调试器（gdb、lldb）和性能分析工具（perf）的基础。HarmonyOS 应用沙箱拒绝 PTRACE_TRACEME，开发者无法在真机上调试 Bun/Node.js 进程。"
+trigger_path = """
+调试器 attach (gdb / lldb / JSC inspector)
+  → ptrace(PTRACE_TRACEME, 0, NULL, NULL)
+    → 返回 EPERM（沙箱禁止 ptrace）"""
+solution_file = "solutions/a3_ptrace.c"
+
+[[probes]]
+id = "a4_cap_sys_ptrace"
+category = "A"
+desc = "Capabilities ambient 集中是否包含 CAP_SYS_PTRACE"
+bun = false
+solution = "HarmonyOS 默认不授予此 capability，需系统级权限签名"
+no_portable_fallback = "capability 由内核 LSM/签名授予，应用层无法在运行期获取；唯一路径是申请系统级签名（与 a3_ptrace 的 fallback 重叠：调试时用 SIGSEGV crash handler 替代）。"
+
+[[probes]]
+id = "a5_landlock_create_ruleset"
+category = "A"
+desc = "Landlock LSM 规则集创建"
+bun = false
+solution = "内核未实现 Landlock LSM，暂无替代方案"
+no_portable_fallback = "Landlock 是内核 LSM 模块，应用层无法用户态模拟（任何 chroot/namespace 替代都需要 CAP_SYS_ADMIN，HarmonyOS 沙箱已拒绝）。等价能力需要等内核启用 Landlock。"
+
+[[probes]]
+id = "a6_bpf"
+category = "A"
+desc = "bpf(BPF_MAP_CREATE) BPF map 创建 — 通用 eBPF 能力探针"
+bun = false
+vite_plus = false
+priority = "P2"
+solution = "BPF 被沙箱限制，需系统级权限或特权进程"
+no_portable_fallback = "bpf() syscall 在沙箱中直接返回 EPERM；无可用的用户态等价物。注意：seccomp 使用 cBPF（经典BPF），由 seccomp() 内核内部处理，用户态不直接调用 bpf()。eBPF map 用于 tracing/网络等场景，非前端工具链依赖。"
+trigger_path = """
+通用 Linux eBPF 能力（非特定项目依赖）:
+  → bpf(BPF_MAP_CREATE, ...) — 创建 eBPF map
+  → 用于: bpftrace, eBPF 网络监控, 性能分析工具
+  → 注意: seccomp 使用 cBPF，由 seccomp() syscall 内核内部加载，不经过 bpf()"""
+
+[[probes]]
+id = "a7_userfaultfd"
+category = "A"
+desc = "userfaultfd 用户态缺页处理"
+bun = false
+solution = "内核未实现 userfaultfd，暂无替代方案"
+no_portable_fallback = "userfaultfd 需内核支持，无用户态等价方案；JIT/checkpoint 等场景需改用 mprotect + SIGSEGV handler 自实现 page fault 拦截（开销远高于 uffd，不构成等价替代）。"
+
+[[probes]]
+id = "a8_rseq"
+category = "A"
+desc = "rseq (293) 可重启序列 — glibc 启动时注册（musl 不注册）"
+bun = false
+bun_run = true
+solution = "向 HarmonyOS 团队申请放行 rseq (293)；仅影响 glibc 工具链，不影响 musl/Bun"
+priority = "P2"
+impact = "rseq 是 Linux 5.1+ 内核特性，用于 per-CPU 无锁操作加速。仅 glibc (≥2.35) 在线程创建时自动注册 rseq；musl 不注册 rseq，Bun 不受影响。影响范围：glibc 链接的 Node.js/Deno 等运行时在 HarmonyOS 上可能触发 SIGSYS。"
+trigger_path = """
+glibc 进程/线程启动
+  → __init_tp / start_thread 自动注册 rseq
+    → syscall(SYS_rseq=293, &rseq, sizeof rseq, 0, RSEQ_SIG)
+      → seccomp filter → SIGSYS → 进程终止
+
+注：Bun 使用 musl libc，musl 未实现 rseq 注册，因此 Bun 不受此影响。"""
+solution_file = "solutions/a8_rseq.c"
+
+[[probes]]
+id = "a9_pidfd_open"
+category = "A"
+desc = "pidfd_open (434) 进程 fd — Bun add spawn 子进程"
+bun = true
+webkit = true
+solution = "向 HarmonyOS 团队申请放行 pidfd_open (434)；短期用 /proc/<pid> 轮询代替"
+priority = "P1"
+impact = "Bun.spawn() 子进程生命周期追踪依赖 pidfd_open。调用被 seccomp 拦截（SIGSYS），影响 Bun 的进程管理和子进程退出检测。"
+trigger_path = """
+Bun.spawn() 子进程生命周期追踪:
+  → linux_syscall::pidfd_open(pid, flags)                   bun/src/sys/linux_syscall.rs:481
+    → libc::syscall(434, pid, flags)                        硬编码 SYS_pidfd_open (Android cfg)
+      → seccomp filter → SIGSYS
+
+WebKit Syscalls.h 已定义预留:
+  → __NR_pidfd_open (434)                                     Syscalls.h — 预留未来使用"""
+
+[[probes]]
+id = "a10_close_range"
+category = "A"
+desc = "close_range (436) 批量关闭 fd — Bun add fd 清理"
+bun = true
+solution = "向 HarmonyOS 团队申请放行 close_range (436)；短期可在子进程中逐个 close fd 代替"
+priority = "P1"
+fallback_probe = "j2_close_range_fb"
+impact = "Bun 在 spawn 子进程后调用 close_range 批量关闭继承的文件描述符。调用被 seccomp 拦截（SIGSYS），子进程 fd 泄漏或异常退出，影响 Bun 的进程管理功能。"
+trigger_path = """
+Bun.spawn() 子进程 fd 清理
+  → POSIX_SPAWN_CLOEXEC_DEFAULT (0x4000)               bun/src/spawn_sys/spawn_process.rs:578
+  → fcntl(F_SETFD, FD_CLOEXEC) per fd                   bun/src/spawn_sys/spawn_process.rs:612
+    → libc::syscall(SYS_close_range=436)                内核 close_range(2)
+      → seccomp filter → SIGSYS"""
+solution_file = "solutions/a10_close_range.c"
+
+[[probes]]
+id = "a11_perf_event_open"
+category = "A"
+desc = "perf_event_open (241) 性能监控 — JSC 性能分析"
+bun = false
+priority = "P2"
+bun_run = true
+
+[[probes]]
+id = "b1_ld_preload"
+category = "B"
+desc = "LD_PRELOAD 动态库预加载是否生效"
+bun = false
+solution = "向 HarmonyOS 团队申请 LD_PRELOAD 能力；非注入场景可改用静态链接"
+
+[[probes]]
+id = "b2_rtld_next"
+category = "B"
+desc = "dlsym(RTLD_NEXT) 跳转到下一符号定义 — Bun workaround-missing-symbols 核心机制"
+bun = true
+priority = "P2"
+trigger_path = """
+Bun glibc 兼容层符号动态查找
+  → dlsym(RTLD_NEXT, "getrandom")                           workaround-missing-symbols.cpp
+  → dlsym(RTLD_NEXT, "quick_exit")
+  → dlsym(RTLD_NEXT, "fcntl64")
+    → 动态链接器 RTLD_NEXT 语义"""
+
+[[probes]]
+id = "b3_rtld_default"
+category = "B"
+desc = "dlsym(RTLD_DEFAULT) 全局符号搜索"
+bun = false
+
+[[probes]]
+id = "b5_dlopen"
+category = "B"
+desc = "dlopen/dlsym/dlclose — Node.js C++ addon (napi) 兼容"
+bun = true
+priority = "P2"
+trigger_path = """
+Bun glibc 兼容层 & Node.js N-API addons:
+  → dlopen("libc.so", RTLD_LAZY)                              workaround-missing-symbols.cpp
+  → dlsym(handle, "getrandom") / dlsym(handle, "quick_exit")
+  → Node.js C++ napi addons → dlopen() 加载 .node 动态库"""
+
+[[probes]]
+id = "c1_execveat_sym"
+category = "C"
+desc = "execveat() 是否存在于 libc 符号表"
+bun = false
+solution = "libc 未导出此符号，可用 syscall(SYS_execveat, ...) 绕过"
+fallback_probe = "j8_execveat_fb"
+solution_file = "solutions/c1_execveat_sym.c"
+
+[[probes]]
+id = "c3_clone3"
+category = "C"
+desc = "clone3() 系统调用"
+bun = false
+solution = "向 HarmonyOS 团队申请 clone3 系统调用；短期降级使用 clone()"
+fallback_probe = "j3_clone3_fb"
+solution_file = "solutions/c3_clone3.c"
+priority = "P1"
+impact = "clone3 是 glibc 2.28+ 及部分工具链创建线程/进程的首选接口，提供扩展的 clone_args 结构体。在 HarmonyOS 上调用导致 SIGSYS（core dump），影响依赖 clone3 的 C 运行时和工具链。"
+trigger_path = """
+C 运行时 / 工具链进程创建
+  → clone3(&args, sizeof(struct clone_args))             glibc 2.28+ / musl
+    → 内核 clone3(2)
+      → seccomp filter → SIGSYS（Signal 31）"""
+
+[[probes]]
+id = "c4_openat2"
+category = "C"
+desc = "openat2 (437) 扩展文件打开 — Bun 受限文件"
+bun = true
+solution = "向 HarmonyOS 团队申请放行 openat2 (437)；短期用 openat() 降级代替"
+priority = "P1"
+fallback_probe = "j4_openat2_fb"
+impact = "Bun 使用 openat2 打开文件时指定 RESOLVE_* 标志以防止路径逃逸。调用被 seccomp 拦截（SIGSYS），影响 Bun 的受限文件打开路径，回退到 openat() 时缺少安全约束。"
+trigger_path = """
+Bun 文件打开（防路径逃逸）
+  → linux_syscall::openat2_beneath(dir, path, flags, mode)   bun/src/sys/linux_syscall.rs:93
+    → rustix::fs::openat2(dir, path, oflags, mode,
+        ResolveFlags::BENEATH)
+      → seccomp filter → SIGSYS"""
+solution_file = "solutions/c4_openat2.c"
+
+[[probes]]
+id = "c5_fchmodat2"
+category = "C"
+desc = "fchmodat2 (452) 带 flags 权限修改 — Bun add 权限"
+bun = false
+bun_run = true
+priority = "P1"
+solution = "两端均不支持：容器无此 syscall (ENOSYS)，HarmonyOS 被 seccomp 拦截。向 HarmonyOS 申请放行"
+fallback_probe = "j12_fchmodat2_fb"
+solution_file = "solutions/c5_fchmodat2.c"
+
+[[probes]]
+id = "c6_process_vm"
+category = "C"
+desc = "process_vm_readv/writev (270/271) — JSC 调试器跨进程读写"
+bun = true
+priority = "P2"
+webkit = true
+trigger_path = """
+JSC 调试器跨进程内存读写 (Bun inspector)
+  → libc::process_vm_readv(pid, ...) / process_vm_writev(pid, ...)
+    → 内核 process_vm_readv(2) / process_vm_writev(2)
+WebKit: JSC Inspector 跨进程读取被调试进程内存"""
+
+[[probes]]
+id = "c7_statx"
+category = "C"
+desc = "statx 扩展 stat — Bun sys/lib.rs:2265"
+bun = true
+priority = "P1"
+webkit = true
+solution = "两端均已通过，statx 可在 musl 上正常使用"
+trigger_path = """
+Bun fs.stat() / Bun.file().size 文件元数据查询:
+  → workaround_symbols.statx(dir, path, flags, mask, buf)    bun/src/workaround_missing_symbols.zig
+    → std.os.linux.statx(dirfd, path, flags, mask, buf)
+      → 内核 statx(2)
+
+WebKit 文件创建时间查询:
+  → statx(-1, path, 0, STATX_BTIME, &fileInfo)               FileSystemPOSIX.cpp:103-105
+  → HAVE_STATX 编译时检测                                     OptionsCommon.cmake:321"""
+
+[[probes]]
+id = "c8_renameat2"
+category = "C"
+desc = "renameat2 原子 rename — Bun sys/lib.rs:2519"
+bun = true
+priority = "P2"
+solution = "两端均已通过，renameat2 可在 musl 上正常使用"
+trigger_path = """
+Bun fs.rename() 原子重命名
+  → libc::syscall(SYS_renameat2, olddir, oldpath, newdir, newpath, flags)
+    → 内核 renameat2(2)"""
+
+[[probes]]
+id = "c9_getrandom"
+category = "C"
+desc = "getrandom 内核随机数 — Bun workaround-missing-symbols.cpp:173"
+bun = true
+priority = "P1"
+solution = "两端均已通过，getrandom 可在 musl 上正常使用"
+trigger_path = """
+Bun crypto.randomUUID() / crypto.getRandomValues()
+  → getrandom::getrandom(buf)                            getrandom crate v0.4 (Cargo.toml)
+    → libc::getrandom(buf, len, 0)                       libc crate
+      → 内核 getrandom(2)"""
+
+[[probes]]
+id = "c10_preadv2"
+category = "C"
+desc = "preadv2 带 flag 分散读 — Bun c-bindings.cpp:470"
+bun = true
+priority = "P2"
+solution = "两端均已通过，preadv2 (RWF_NOWAIT) 正常可用"
+trigger_path = """
+Bun.file().arrayBuffer() 指定偏移分散读
+  → linux_syscall::preadv(fd, iovec[], offset)           bun/src/sys/linux_syscall.rs:305
+    → libc::syscall(SYS_preadv, fd, vecs, n, lo, hi)    libc crate
+      → 内核 preadv2(2)"""
+
+[[probes]]
+id = "c11_pwritev2"
+category = "C"
+desc = "pwritev2 带 flag 聚集写 — Bun c-bindings.cpp:478"
+bun = true
+priority = "P2"
+solution = "两端均已通过，pwritev2 正常可用"
+trigger_path = """
+Bun.write() 指定偏移聚集写
+  → linux_syscall::pwritev(fd, iovec[], offset)          bun/src/sys/linux_syscall.rs:335
+    → libc::syscall(SYS_pwritev, fd, vecs, n, lo, hi)   libc crate
+      → 内核 pwritev2(2)"""
+
+[[probes]]
+id = "c12_getdents64"
+category = "C"
+desc = "getdents64 目录项读取 — Bun linux_syscall.rs:509"
+bun = true
+priority = "P2"
+solution = "两端均已通过；注意沙箱可能限制根目录读取，需用当前目录测试"
+trigger_path = """
+Bun fs.readdir() / glob / import 模块解析
+  → linux_syscall::getdents64(fd, buf, len)              bun/src/sys/linux_syscall.rs:500
+    → libc::syscall(SYS_getdents64, fd, buf, len)        libc crate
+      → 内核 getdents64(2)"""
+
+[[probes]]
+id = "c13_epoll_pwait2"
+category = "C"
+desc = "epoll_pwait2 纳秒级 epoll — Bun platform/linux.rs:39"
+bun = true
+priority = "P0"
+solution = "向 HarmonyOS 团队申请放行 epoll_pwait2 (441)；短期用 epoll_pwait 降级（毫秒精度）"
+fallback_probe = "j5_epoll_pwait2_fb"
+impact = "Bun 事件循环使用 epoll_pwait2 实现纳秒级超时精度。调用被 seccomp 拦截（SIGSYS），Bun 无法启动事件循环，影响所有异步 I/O 操作。"
+trigger_path = """
+Bun 事件循环纳秒级超时等待
+  → sys_epoll_pwait2(epfd, events, max,                  bun/src/platform/linux.rs:29
+      timeout, sigmask)
+    → libc::syscall(SYS_epoll_pwait2, epfd, events,      libc crate
+        max, timeout, sigmask, 8)
+      → seccomp filter → SIGSYS"""
+solution_file = "solutions/c13_epoll_pwait2.c"
+
+[[probes]]
+id = "c14_gettid"
+category = "C"
+desc = "gettid 线程 ID — pthread/musl 内部调用"
+bun = true
+webkit = true
+priority = "P0"
+solution = "两端均已通过，gettid 正常可用"
+trigger_path = """
+Bun / pthread 获取线程 ID:
+  → libc::syscall(SYS_gettid)                                libc crate (pthread 内部)
+    → 内核 gettid(2)
+
+WebKit 线程 ID 检测:
+  → syscall(SYS_gettid)                                      ThreadingPOSIX.cpp:238
+  → getpid() == syscall(SYS_gettid) (musl 主线程检测)        StackBounds.cpp:149"""
+
+[[probes]]
+id = "c15_futex"
+category = "C"
+desc = "futex 快速用户锁 — pthread 同步原语基础"
+bun = true
+webkit = true
+priority = "P0"
+solution = "两端均已通过，futex 正常可用"
+trigger_path = """
+Bun / pthread 同步原语 (mutex/semaphore/condvar):
+  → libc::syscall(SYS_futex, uaddr, op, val,                 libc crate (pthread 内部)
+      timeout, uaddr2, val3)
+    → 内核 futex(2)
+
+WebKit 内部直接 futex 调用:
+  → syscall(SYS_futex, ...)                                   ANGLE SimpleMutex.cpp:36
+  → syscall(SYS_futex, ...)                                   libwebrtc futex.h:130,140"""
+
+[[probes]]
+id = "d1_shm"
+category = "D"
+desc = "shm_open/mmap 创建 POSIX 共享内存 — WebKit SharedMemoryUnix 三级后备链"
+bun = true
+priority = "P2"
+webkit = true
+trigger_path = """
+WebKit 进程间共享内存 (Bun 静态链接):
+  → syscall(__NR_memfd_create, "WebKitSharedMemory", MFD_CLOEXEC)   SharedMemoryUnix.cpp:87
+    → ENOSYS? → shm_open(SHM_ANON, ...)                             同文件:102
+      → 不可用? → shm_open(tempName, O_CREAT | O_RDWR, ...)         同文件:111
+        → ftruncate + mmap(MAP_SHARED)"""
+solution = "memfd_create → shm_open → shm_open 临时名称 三级后备链，WebKit 自动降级"
+
+[[probes]]
+id = "d2_mmap_shared"
+category = "D"
+desc = "MAP_SHARED 匿名映射 — JSC SharedArrayBuffer 依赖"
+bun = true
+webkit = true
+priority = "P0"
+trigger_path = """
+JSC SharedArrayBuffer & WebKit 进程间共享内存 (Bun 静态链接):
+  → mmap(NULL, len, PROT_READ|PROT_WRITE,
+      MAP_SHARED|MAP_ANONYMOUS, -1, 0)                      OSAllocatorPOSIX.cpp:231
+  → WebKit SharedMemoryUnix.cpp:135,152 — mmap(MAP_SHARED)
+  → JSC 堆管理 — MAP_SHARED 用于共享内存 GC 堆"""
+
+[[probes]]
+id = "d3_dev_shm"
+category = "D"
+desc = "/dev/shm 是否可写 — WebKit shm_open 底层依赖"
+bun = true
+priority = "P2"
+webkit = true
+trigger_path = """
+WebKit POSIX 共享内存底层挂载点 (Bun 静态链接):
+  → shm_open("WK2SharedMemory.XXXXXX", O_CREAT | O_RDWR, 0600)
+    → glibc/musl shm_open() 内部打开 /dev/shm/WK2SharedMemory.XXXXXX
+      → 需 /dev/shm 可写"""
+
+[[probes]]
+id = "d4_memfd"
+category = "D"
+desc = "memfd_create (279) 内存文件 — Bun add 触发"
+bun = true
+priority = "P1"
+webkit = true
+trigger_path = """
+Bun.spawn() stdio 管道替代方案:
+  → bun_sys::memfd_create("bun-spawn-stdio",                 bun/src/spawn_sys/spawn_process.rs:782
+      MemfdFlags::CrossProcess)
+    → 内核 memfd_create(2)
+
+WebKit 共享内存 & seccomp BPF:
+  → syscall(__NR_memfd_create, "WebKitSharedMemory",          SharedMemoryUnix.cpp:87
+      MFD_CLOEXEC)
+  → syscall(__NR_memfd_create, ..., MFD_CLOEXEC|MFD_ALLOW_SEALING)
+      (seccomp BPF + argument passing)                        BubblewrapLauncher.cpp:68"""
+
+[[probes]]
+id = "d5_copy_file_range"
+category = "D"
+desc = "copy_file_range (285) 内核态拷贝 — Bun 大文件"
+bun = true
+priority = "P2"
+solution = "当前两端均已通过，无需额外操作"
+trigger_path = """
+Bun.write() / Bun cp 命令内核态零拷贝
+  → copy_file_range(in_fd, off, out_fd, off2,            bun/src/sys/copy_file.rs:329
+      len, flags)
+    → libc::syscall(SYS_copy_file_range, in_fd,          libc crate
+        off, out_fd, off2, len, flags)
+      → 内核 copy_file_range(2)"""
+
+[[probes]]
+id = "d6_memfd_dup2_fstat"
+category = "D"
+desc = "memfd_create + 子进程 dup2(memfd,1) + write，父 fstat 取回 st_size"
+bun = true
+priority = "P1"
+impact = "fork commit 0028 'Disable memfd for spawnSync on OHOS' 兜底为 socketpair。若本探针在设备侧失败（st_size=0），spawnSync 零拷贝 stdio 路径不可用，必须保留 socketpair fallback。"
+solution = "若 OHOS quirk 复现（st_size=0），spawnSync stdio 走 socketpair；正常则可启用 memfd 零拷贝路径。"
+trigger_path = """
+Bun.spawnSync() stdio 采集（零拷贝读取）:
+  → bun_sys::memfd_create('bun-spawn-stdio', CLOEXEC|SEAL)  src/spawn_sys/spawn_process.rs:782
+    → posix_spawn 子进程 dup2(memfd, STDOUT_FILENO)
+      → 子进程 write(1, ...)
+        → 父 waitpid + fstat(memfd, &st) → st.st_size == n"""
+
+[[probes]]
+id = "d7_pidfd_poll_wait"
+category = "D"
+desc = "pidfd_open(X) + poll(POLLIN) + wait4(X, WNOHANG) 同 pid race 检测"
+bun = true
+priority = "P2"
+impact = "**HM 上观察到 race**：同 pid 上 pidfd POLLIN 触发后 wait4(WNOHANG) 仍返 0（task struct 可见性窗口）。但 fork spawn/process.rs:3266 的设计是 pidfd-on-PARENT + wait4-on-CHILD（不同 pid）+ wait4 flags=0（blocking），不受此 race 影响。本探针仅记录 OHOS 内核 quirk，不要求 bun 改动。"
+solution = "若未来有 pidfd+WNOHANG 同 pid 用法需要 retry 循环；当前 fork 实现规避了该模式。"
+trigger_path = """
+Bun.spawn() no_orphans 父死检测:
+  → spawn/process.rs:3252 OHOS 分支
+    → pidfd_open(ppid, 0)
+    → poll([pidfd, stdio_fds], timeout)
+    → wait4(pid, ..., WNOHANG)"""
+
+[[probes]]
+id = "e1_socketpair"
+category = "E"
+desc = "socketpair(AF_UNIX) 创建套接字对"
+bun = true
+priority = "P1"
+solution = "两端均已通过，socketpair 正常可用"
+trigger_path = """
+Bun.spawn() 父子进程 IPC 管道
+  → bun_sys::socketpair(AF_UNIX, SOCK_STREAM, 0)        bun/src/spawn_sys/spawn_process.rs:800
+    → libc::socketpair(AF_UNIX, SOCK_STREAM, 0, sv)      libc crate
+      → 内核 socketpair(2)"""
+
+[[probes]]
+id = "e2_scm_rights"
+category = "E"
+desc = "SCM_RIGHTS fd 传递 — libuv IPC 依赖"
+bun = false
+priority = "P1"
+vite_plus = true
+trigger_path = """
+libuv Unix 域 socket fd 传递:
+  → sendmsg(fd, &msg, 0)  with SCM_RIGHTS ancillary data
+  → recvmsg(fd, &msg, 0)  receiving fd from another process
+  → libuv/src/unix/stream.c — uv_write2 通过 SCM_RIGHTS 传递 fd
+
+vite-plus fspy fd 传递:
+  → passfd crate (polachok/passfd) — Unix socket SCM_RIGHTS
+  → vite-task/crates/fspy_shared_unix — 跨进程 fd 传递"""
+
+[[probes]]
+id = "e3_eventfd_signalfd"
+category = "E"
+desc = "eventfd + signalfd — libuv 事件循环依赖"
+bun = true
+webkit = true
+priority = "P0"
+trigger_path = """
+libuv & WebKit 事件通知机制 (Bun 静态链接 libuv):
+  → eventfd(0, EFD_NONBLOCK|EFD_CLOEXEC)                    RealTimeThreads.cpp (WebKit)
+  → signalfd(-1, &mask, SFD_NONBLOCK|SFD_CLOEXEC)            libuv/src/unix/linux.c
+  → timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK|TFD_CLOEXEC) RunLoopGLib.cpp (WebKit)
+  → libuv epoll 事件循环注册 eventfd/signalfd/timerfd"""
+
+[[probes]]
+id = "e4_epoll"
+category = "E"
+desc = "epoll_create1 + epoll_wait 事件轮询"
+bun = true
+webkit = true
+priority = "P0"
+trigger_path = """
+Bun 事件循环 I/O 多路复用:
+  → linux_syscall::epoll_ctl(epfd, op, fd, event)            bun/src/sys/linux_syscall.rs:408
+    → libc::syscall(SYS_epoll_ctl, epfd, op, fd, ev)        libc crate
+      → 内核 epoll_ctl(2)
+
+WebKit GLib 事件循环 epoll 集成:
+  → epoll_create1 / epoll_ctl / epoll_wait                      RunLoopGLib.cpp
+  → µWebSockets (uws_sys) epoll 事件驱动 (Bun 静态链接)"""
+
+[[probes]]
+id = "e5_fanotify"
+category = "E"
+desc = "fanotify_init 文件系统事件监控"
+bun = false
+solution = "fanotify 被沙箱限制，可用 inotify 替代文件监控"
+fallback_probe = "j9_fanotify_fb"
+solution_file = "solutions/e5_fanotify.c"
+
+[[probes]]
+id = "e6_flock"
+category = "E"
+desc = "flock(LOCK_EX|LOCK_NB) 获取文件顾问锁并释放"
+bun = false
+
+[[probes]]
+id = "e7_unix_socket"
+category = "E"
+desc = "Unix 域套接字 bind/listen/accept/connect/send/recv 完整生命周期"
+bun = true
+solution = "HarmonyOS 沙箱禁止 Unix socket bind()，用 TCP loopback (127.0.0.1) 替代本机 IPC"
+priority = "P2"
+impact = "HarmonyOS 沙箱拒绝 Unix 域套接字的 bind() 操作（EPERM），但 socketpair (AF_UNIX) 可用。影响 Node.js IPC、Bun 的 Unix socket server、PostgreSQL 等通过 Unix socket 通信的服务。"
+trigger_path = """
+Bun.spawn() IPC 管道
+  → socketpair(AF_UNIX) ✅ 可用                          bun/src/spawn_sys/spawn_process.rs:800
+Bun Unix socket server
+  → bind(AF_UNIX, /path/to/sock) ❌ EPERM
+    → libc::bind(fd, &addr, sizeof(sockaddr_un))          libc crate
+      → HarmonyOS 沙箱拒绝 bind()"""
+solution_file = "solutions/e7_unix_socket.c"
+
+[[probes]]
+id = "e8_socketpair_fstat"
+category = "E"
+desc = "socketpair(AF_UNIX) 创建后对每端 fd 调 fstat() 是否返 EACCES"
+bun = true
+priority = "P1"
+impact = "fork 在 src/sys/lib.rs fstat() OHOS 分支加了 EACCES → 返零 stat 兜底，注释说 socketpair / 某些 fd 类型在 OHOS 上 fstat 会返 EACCES。e1_socketpair 只测创建，本探针补测后续 fstat。若复现，stdio 长度感知逻辑必须接受 zero-stat。"
+solution = "若 EACCES 复现，bun_sys::fstat 需 OHOS 分支返回 S_IFSOCK 兜底 stat。"
+trigger_path = """
+Bun.spawn() 父进程读取 stdio:
+  → bun_sys::fstat(socketpair_fd)                          src/sys/lib.rs:2128
+    → libc::fstat(fd, &st)
+      → 内核 fstat(2)"""
+
+[[probes]]
+id = "f1_proc_maps"
+category = "F"
+desc = "/proc/self/maps — Zig/JSC 崩溃报告依赖"
+bun = true
+priority = "P2"
+webkit = true
+trigger_path = """
+JSC 崩溃报告 & Bun 内存诊断:
+  → fopen("/proc/self/maps", "r")                            crash_handler.zig / lib.rs
+  → 逐行解析 maps 获取加载的共享库列表
+  → WebKit CurrentProcessMemoryStatus.cpp — fopen("/proc/self/statm")"""
+
+[[probes]]
+id = "f2_proc_self_exe"
+category = "F"
+desc = "/proc/self/exe — Zig selfExePath 依赖"
+bun = true
+priority = "P2"
+webkit = true
+trigger_path = """
+Bun 自身可执行文件路径解析:
+  → readlink("/proc/self/exe", buf, PATH_MAX)                 bun.zig: selfExePath()
+  → WebKit ProcessExecutablePath.cpp — readlink("/proc/self/exe")
+  → bun run 入口 — 解析当前可执行文件路径用于模块解析和资源定位"""
+
+[[probes]]
+id = "f3_prctl_get_name"
+category = "F"
+desc = "prctl(PR_GET_NAME) — JSC ThreadingPOSIX 依赖"
+bun = true
+priority = "P2"
+webkit = true
+trigger_path = """
+JSC 线程命名 & Bun 线程管理:
+  → prctl(PR_SET_NAME, "JSC Worker", ...)                     ThreadingPOSIX.cpp:381
+  → prctl(PR_GET_NAME, buf) — 读取当前线程名称
+  → Bun Global.zig / Global.rs — prctl(PR_SET_NAME) + PR_SET_PDEATHSIG"""
+
+[[probes]]
+id = "g1_tmpfile"
+category = "G"
+desc = "tmpfile() — musl libc / JSC 模块缓存依赖"
+bun = true
+webkit = true
+solution = "沙箱限制 P_tmpdir，改用 mkstemp() 在应用私有目录创建临时文件"
+priority = "P2"
+fallback_probe = "j6_tmpfile_fb"
+impact = "OHOS 移植版 musl 将 tmpfile() 默认路径硬编码为 /data/local/tmp，HarmonyOS 应用沙箱拒绝写入该路径（EACCES）。依赖 tmpfile() 的标准 C 程序无法创建临时文件。"
+trigger_path = """
+musl libc tmpfile() 调用:
+  → musl tmpfile() → openat(AT_FDCWD, P_tmpdir, O_RDWR|O_CREAT|O_EXCL)
+    → P_tmpdir = "/data/local/tmp"
+      → openat("/data/local/tmp/tmp-XXXXXX")
+        → EACCES（HarmonyOS 应用沙箱拒绝写入）
+
+WebKit JSC 临时文件:
+  → mkostemp(template, O_CLOEXEC)                             FileSystemPOSIX.cpp:191
+  → JSC 模块缓存 / 编译产物临时文件"""
+solution_file = "solutions/g1_tmpfile.c"
+
+[[probes]]
+id = "g2_dladdr"
+category = "G"
+desc = "dladdr() 地址反查所属共享库"
+bun = false
+
+[[probes]]
+id = "g3_tls_emulated"
+category = "G"
+desc = "__thread TLS — Zig 编译目标 OHOS TLS 实现检测"
+bun = true
+priority = "P2"
+webkit = true
+trigger_path = """
+Bun/Zig OHOS 目标 TLS ABI 检测 & WebKit 线程局部存储:
+  → __thread int tls_val = 0; 校验线程间地址不同
+  → WebKit ThreadingPOSIX.cpp — _pthread_setspecific_direct (fast TLS)
+  → Bun __cxa_thread_atexit_impl — glibc 兼容层线程退出回调
+  → Zig OHOS 目标编译时检测: emulated TLS vs ELF native TLS ABI"""
+
+[[probes]]
+id = "g4_getcwd"
+category = "G"
+desc = "getcwd() 获取当前工作目录 — Bun CLI/resolver/fs/shell 等 30+ 调用点"
+bun = true
+trigger_path = """
+Bun CLI 入口 / 模块解析 / Node.js process.cwd() / fs 相对路径
+  → bun_core::getcwd(buf)                                   src/bun_core/util.rs:4350
+    → libc::getcwd(buf.as_mut_ptr().cast(), buf.len())      同文件:4356
+      → 内核 getcwd(2)
+
+Bun 事件循环 / Shell / Glob / lockfile / bundler / fetch 等
+  → bun_sys::getcwd(&mut buf[..])                            src/sys/lib.rs:2648
+  → bun_sys::getcwd_alloc() / getcwd_z()                     src/sys/lib.rs:904-914
+    → libc::getcwd(...)
+      → 内核 getcwd(2)
+
+所有调用点（Rust 侧）:
+  bun_core::getcwd           — 核心封装
+  bun_sys::Syscall::getcwd   — syscall 层
+  crash_handler               — 崩溃报告
+  MiniEventLoop               — 事件循环启动
+  GlobWalker                  — glob 基路径
+  lockfile / PackageManager   — 包管理 cwd
+  patchPackage / WorkspaceMap — workspace 路径
+  resolver::fs / resolver     — 模块解析
+  run_command / Arguments     — bun run 入口
+  audit_command / exec_command
+  install_completions_command
+  pack_command / package_manager_command
+  node_fs / node_process      — Node.js 兼容 (process.cwd, fs)
+  shell/interpreter / rm      — Shell 解释器
+  fetch / bake / bundler      — Web API / 构建 / 打包
+  StandaloneModuleGraph       — standalone bundle
+  ansi_renderer               — markdown 渲染
+"""
+solution = "getcwd() 依赖于进程的当前工作目录。HarmonyOS 沙箱下 cwd 可能是受限制的路径，导致 getcwd() 返回成功但 stat() 失败。若 cwd 不可访问，可在 spawn 时显式设置 cwd 到应用私有目录。"
+priority = "P1"
+impact = "Bun 在 CLI 入口、模块解析、Node.js process.cwd()、fs 相对路径、shell 解释器、包管理、lockfile、bundler、事件循环启动等 30+ 处调用 getcwd()。若 getcwd() 失败或返回不可访问的路径，Bun 将无法启动或功能异常（如 ENOENT → bun run 直接 panic）。"
+
+[[probes]]
+id = "g5_linkat_eperm"
+category = "G"
+desc = "linkat(AT_FDCWD) 在沙箱受限目录是否返 EPERM"
+bun = true
+priority = "P1"
+impact = "fork 在 src/install/{PackageManager,isolated_install/Hardlinker}.rs 加了 hardlink 失败回退到 copy 的兜底。若 EPERM 复现，bun install isolated 模式必须走 copy fallback，否则依赖去重断裂。"
+solution = "若复现，PackageInstaller hardlink 路径捕获 EPERM 并回退到 copy_file_range/read+write。"
+trigger_path = """
+Bun isolated install / cache hardlink:
+  → bun_install::Hardlinker::link(src, dst)             src/install/isolated_install/Hardlinker.rs
+    → libc::linkat(AT_FDCWD, src, AT_FDCWD, dst, 0)
+      → 内核 linkat(2)"""
+
+[[probes]]
+id = "g6_symlinkat_eperm"
+category = "G"
+desc = "symlinkat(AT_FDCWD) 在沙箱受限目录是否返 EPERM"
+bun = true
+priority = "P1"
+impact = "fork 在 src/install/PackageInstall.rs 加了 symlinkat EPERM 兜底。若复现，bun install 创建 node_modules/.bin/* 必须 fallback 到拷贝可执行脚本。"
+solution = "PackageInstall::link_bin 捕获 EPERM 并改为拷贝可执行文件。"
+trigger_path = """
+Bun PackageInstall bin 链接:
+  → bun_install::PackageInstall::link_bin                src/install/PackageInstall.rs
+    → libc::symlinkat(target, AT_FDCWD, linkpath)
+      → 内核 symlinkat(2)"""
+
+[[probes]]
+id = "g7_getcwd_unlinked"
+category = "G"
+desc = "当前目录被 rmdir 后 getcwd() 是否返 ENOENT（lifecycle script 边界）"
+bun = true
+priority = "P1"
+impact = "fork 在 src/install/lifecycle_script_runner.rs 加了 getcwd 失败 → HOME fallback。注释说 OHOS 上某些 prepare/install script 跑完会清理 cwd，下一个 hook 调用 getcwd 即 ENOENT。若复现，lifecycle script chain 第二个起会 panic。"
+solution = "lifecycle_script_runner 在 getcwd ENOENT 时 fallback 到 HOME（或上一已知有效 cwd）。"
+trigger_path = """
+Bun lifecycle script runner:
+  → bun_install::lifecycle_script_runner::spawn         src/install/lifecycle_script_runner.rs
+    → libc::getcwd(buf, len)
+      → 内核 getcwd(2) — 若 cwd 已被 rmdir 则返 ENOENT"""
+
+[[probes]]
+id = "g8_ancestor_stat_eacces"
+category = "G"
+desc = "从 HOME/cwd/沙箱典型路径向上 walk 各祖先 stat 是否 EACCES/EPERM"
+bun = true
+priority = "P1"
+impact = "fork resolver.rs 加了 'continue queue_walk' 跳过 EACCES/EPERM 祖先目录。若复现，resolver 不 skip 会直接 fail；若不复现，skip 分支可能多余。"
+solution = "resolver::Resolver::dir_info_uncached 捕获 EACCES/EPERM 跳过祖先继续找子目录。"
+trigger_path = """
+Bun resolver 向上找 node_modules / tsconfig / package.json:
+  → resolver::Resolver::dir_info_uncached                src/resolver/resolver.rs:4398
+    → opendir/stat 每一级祖先（"/", "/storage", ...）"""
+
+[[probes]]
+id = "g9_bun_cache_linkat"
+category = "G"
+desc = "$HOME/.bun/install/cache → store 真实路径 linkat 是否成功（补 g5 盲点）"
+bun = true
+priority = "P1"
+impact = "g5 只测 TMPDIR (/data/storage/el3/base)，真实 bun install 跑在 $HOME/.bun/install/{cache,store}。验证真实路径下 hardlink 是否仍 EACCES。"
+solution = "Hardlinker 捕获 EACCES/EPERM/EXDEV 回退到 copy_file_range/read+write。"
+trigger_path = """
+Bun install isolated 模式 cache → store:
+  → bun_install::Hardlinker::link(cache_src, store_dst)  src/install/isolated_install/Hardlinker.rs
+    → libc::linkat(AT_FDCWD, '$HOME/.bun/install/cache/...', AT_FDCWD, '...', 0)"""
+
+[[probes]]
+id = "g10_bun_bin_symlinkat"
+category = "G"
+desc = "node_modules/.bin 真实布局下 symlinkat 是否成功（补 g6 盲点）"
+bun = true
+priority = "P1"
+impact = "g6 只测 TMPDIR，真实 bun install 在 cwd 下创建 node_modules/.bin/*。验证真实布局下 symlink 是否仍 EPERM。"
+solution = "PackageInstall::link_bin 捕获 EPERM/EACCES 改为拷贝可执行文件。"
+trigger_path = """
+Bun install 创建可执行链接:
+  → bun_install::PackageInstall::link_bin                src/install/PackageInstall.rs
+    → libc::symlinkat('../package/bin.js', AT_FDCWD, 'node_modules/.bin/foo')"""
+
+[[probes]]
+id = "h1_pthread_cancel"
+category = "H"
+desc = "pthread_cancel() 取消线程"
+bun = false
+solution = "musl 不支持 pthread_cancel，用 pthread_kill + 信号处理替代"
+fallback_probe = "j10_pthread_cancel_fb"
+solution_file = "solutions/h1_pthread_cancel.c"
+
+[[probes]]
+id = "h2_getusershell"
+category = "H"
+desc = "getusershell() 获取合法 Shell 列表"
+bun = false
+
+[[probes]]
+id = "h3_program_invocation"
+category = "H"
+desc = "program_invocation_name 全局变量"
+bun = false
+
+[[probes]]
+id = "h4_res_state"
+category = "H"
+desc = "_res DNS 解析器全局状态"
+bun = false
+solution = "musl 未导出 _res 全局变量，使用 getaddrinfo() 替代 DNS 查询"
+fallback_probe = "j11_res_state_fb"
+solution_file = "solutions/h4_res_state.c"
+
+[[probes]]
+id = "h5_pthread_setcancelstate"
+category = "H"
+desc = "pthread_setcancelstate() 设置取消状态"
+bun = false
+
+[[probes]]
+id = "h6_getpass"
+category = "H"
+desc = "getpass() 读取密码（不回声）"
+bun = false
+
+[[probes]]
+id = "h7_cxa_thread_atexit_impl"
+category = "H"
+desc = "__cxa_thread_atexit_impl 线程退出回调注册"
+bun = true
+priority = "P1"
+impact = "Bun 依赖 __cxa_thread_atexit_impl 实现 glibc 兼容层线程退出回调，用于 C++ thread_local 析构和线程清理。若缺失，Bun 线程退出时无法正确调用 thread_local 对象析构函数，可能导致内存泄漏或资源未释放。"
+solution = "若 musl 未导出此符号，需在 Bun 的 glibc 兼容层自行实现线程退出回调链（pthread_key + destructor 模拟）。"
+trigger_path = """
+Bun glibc 兼容层线程退出:
+  → __cxa_thread_atexit_impl(func, obj, dso)               glibc 兼容层
+    → C++ thread_local 析构链
+    → WebKit ThreadingPOSIX.cpp 线程退出清理"""
+
+[[probes]]
+id = "i1_chmod_hmdfs"
+category = "I"
+desc = "chmod() 在 HMDFS 文件系统上是否生效"
+bun = false
+solution = "HMDFS 不支持 POSIX 权限语义，使用应用沙箱文件保护 API 替代"
+priority = "P2"
+no_portable_fallback = "HMDFS 在内核层强制 mode 位：group 强制 rw、other 强制 0，且实测 owner 位也被强制为 rwx（chmod 0500 → owner=7）。chmod 返回 0 但实际位被覆盖，应用层无法绕过；唯一路径是接受 HMDFS 语义或改用 OHOS 应用沙箱文件保护 API（如 setSecurityLabel）。"
+
+[[probes]]
+id = "i2_dev_fd"
+category = "I"
+desc = "/dev/fd 与 /proc/self/fd 路径可用性"
+bun = false
+
+[[probes]]
+id = "i3_pty"
+category = "I"
+desc = "/dev/ptmx 伪终端设备 — Bun TTYWrap / bun-spawn 终端控制"
+bun = true
+trigger_path = """
+Bun 终端控制 (TTY)
+  → open("/dev/ptmx", O_RDWR | O_NOCTTY)                   TTYWrap.cpp
+  → ioctl(fd, TIOCSCTTY, 0)                                  bun-spawn.cpp (子进程终端)
+  → ioctl(fd, TIOCGWINSZ, &ws)                               TTYWrap.cpp (终端窗口大小)
+    → 需 /dev/ptmx 可打开"""
+solution = "HarmonyOS 沙箱禁止 /dev/ptmx，用 pipe() 替代 PTY（无终端控制功能）"
+priority = "P2"
+
+[[probes]]
+id = "i4_data_local_tmp"
+category = "I"
+desc = "/data/local/tmp 临时目录是否可写"
+bun = false
+solution = "沙箱限制访问 /data/local/tmp，使用应用私有 data 目录替代"
+priority = "P2"
+fallback_probe = "j7_data_local_tmp_fb"
+impact = "/data/local/tmp 是 ADB / 开发者工作流的常用临时目录，HarmonyOS 应用沙箱拒绝该路径写入。影响调试工具上传、shell 脚本中转和开发期文件分发。"
+trigger_path = """
+ADB push / 开发脚本 / CI 部署
+  → write("/data/local/tmp/<file>")
+    → EACCES（HarmonyOS 应用沙箱拒绝该路径写入）"""
+solution_file = "solutions/i4_data_local_tmp.c"
+
+[[probes]]
+id = "i5_system_bin_sh"
+category = "I"
+desc = "/system/bin/sh 是否存在且可执行"
+bun = false
+
+[[probes]]
+id = "i6_sendfile"
+category = "I"
+desc = "sendfile() 零拷贝文件传输"
+bun = true
+priority = "P1"
+trigger_path = """
+Bun.serve() 静态文件零拷贝发送
+  → linux_syscall::sendfile(out_fd, in_fd,               bun/src/sys/linux_syscall.rs:421
+      offset, count)
+    → libc::syscall(71, out_fd, in_fd, offset, count)    aarch64 硬编码 SYS_sendfile = 71
+      → 内核 sendfile(2)"""
+
+[[probes]]
+id = "i7_posix_spawn"
+category = "I"
+desc = "posix_spawn() 创建子进程"
+bun = true
+priority = "P1"
+trigger_path = """
+Bun.spawn() / Bun Shell / bun run 子进程创建
+  → posix_spawn::spawn_z(opts, actions, attr,            bun/src/spawn_sys/posix_spawn.rs
+      path, argv, envp)
+    → posix_spawn_bun(request)                            C++ bun-spawn.cpp
+      → vfork() + execve()
+        → 内核 clone(CLONE_VFORK) + execve(2)"""
+
+[[probes]]
+id = "i8_linux_macro"
+category = "I"
+desc = "__linux__ 预处理器宏是否定义"
+bun = true
+priority = "P2"
+webkit = true
+trigger_path = """
+Bun C/C++ 依赖编译时平台检测 (WebKit/BoringSSL/libuv/mimalloc):
+  → #ifdef __linux__ / #if OS(LINUX)                           CMakeLists.txt / Platform.h
+  → Rust 侧: cfg(target_os = "linux") → linux_syscall.rs
+  → Zig 侧: builtin.os.tag == .linux → sys.zig
+  → WebKit OptionsCommon.cmake:317 — -D_GNU_SOURCE=1 依赖 __linux__"""
+
+[[probes]]
+id = "i9_getpwuid_r"
+category = "I"
+desc = "getpwuid_r(geteuid()) 解析当前用户 — Node.js os.getUserInfo() 依赖"
+bun = false
+nodejs = true
+solution = "HarmonyOS 应用 uid 不在 /etc/passwd 中，用 getenv(\"HOME\") 替代 homedir，用 getlogin_r 或预留 fallback"
+priority = "P2"
+impact = "Node.js os.getUserInfo() 内部调用 uv_os_get_passwd → getpwuid_r(geteuid())。HarmonyOS 沙箱为每个 HAP 分配动态 uid（2002xxxx），这些 uid 不在 /etc/passwd 中，getpwuid_r 返回 ENOENT，Node.js 抛出 'uv_os_get_passwd' 错误。"
+trigger_path = """
+Node.js os.userInfo()
+  → uv_os_get_passwd(&pwd)                                libuv/src/unix/core.c
+    → uv__getpwuid_r(pwd, geteuid())                      libuv/src/unix/core.c
+      → getpwuid_r(uid, &pw, buf, sz, &result)            libc (POSIX)
+        → uid=20020101 not in /etc/passwd → ENOENT"""
+solution_file = "solutions/i9_getpwuid_r.c"
+
+[[probes]]
+id = "i10_pr_set_pdeathsig"
+category = "I"
+desc = "prctl(PR_SET_PDEATHSIG) 父进程死亡信号 — Playwright 浏览器子进程清理"
+bun = false
+playwright = true
+priority = "P1"
+impact = "Playwright 启动浏览器子进程后，若 Node.js 父进程崩溃，浏览器进程应自动终止。若 PR_SET_PDEATHSIG 不可用，浏览器进程将成为孤儿继续运行，占用内存和端口。"
+trigger_path = """
+Playwright 浏览器子进程生命周期管理:
+  → processLauncher.ts — spawn(browserPath, args)
+    → prctl(PR_SET_PDEATHSIG, SIGKILL) — 父进程崩溃时内核自动清理子进程
+    → Node.js child_process — 通过 libuv 启动浏览器进程"""
+
+[[probes]]
+id = "i11_kill_process_check"
+category = "I"
+desc = "kill(pid, 0) 进程存活检查 + kill(pid, SIGTERM) — Playwright 浏览器进程监控"
+bun = false
+playwright = true
+priority = "P1"
+impact = "Playwright 通过 kill(pid, 0) 监控浏览器是否存活，通过 kill(pid, SIGKILL) 强制终止。若 kill() 被沙箱限制，无法检测浏览器崩溃，也无法关闭浏览器进程。"
+trigger_path = """
+Playwright 浏览器进程监控与关闭:
+  → processLauncher.ts — process.kill(browserPid, 0) 检查浏览器是否存活
+  → processLauncher.ts — process.kill(browserPid, 'SIGTERM') 优雅关闭
+  → processLauncher.ts — process.kill(browserPid, 'SIGKILL') 强制终止
+  → Node.js process.kill() → libuv uv_kill() → kill(2)"""
+
+[[probes]]
+id = "i12_waitid_wnohang"
+category = "I"
+desc = "waitid(P_PID, WNOHANG) 非阻塞子进程回收 — Playwright 浏览器退出监听"
+bun = false
+playwright = true
+priority = "P1"
+impact = "Playwright 依赖 waitid(WNOHANG) 异步监听浏览器进程退出。若被限制，浏览器退出时 Node.js 无法收到 'exit' 事件，测试将挂起等待超时。"
+trigger_path = """
+Playwright 浏览器退出事件监听:
+  → Node.js child_process.on('exit', callback) 监听浏览器退出
+    → libuv uv__wait_children() → waitid(P_ALL, 0, &info, WNOHANG | WEXITED)
+      → 非阻塞检查已终止子进程，回收僵尸进程"""
+
+[[probes]]
+id = "i13_fcntl_nonblock"
+category = "I"
+desc = "fcntl(F_SETFL, O_NONBLOCK) 非阻塞 fd — 所有异步 I/O 基础"
+bun = true
+playwright = true
+priority = "P0"
+impact = "所有异步 I/O（事件循环、pipe、socket）依赖 fcntl(O_NONBLOCK)。Bun/libuv/Node.js 在创建任何 fd 后立即设置非阻塞标志。"
+trigger_path = """
+Bun 事件循环 & Playwright 浏览器 stdio:
+  → fcntl(fd, F_GETFL) / fcntl(fd, F_SETFL, flags|O_NONBLOCK)
+  → libuv uv__nonblock() — 每次 uv__open_cloexec 后设置 O_NONBLOCK
+  → Node.js net.Socket → libuv uv_tcp_open → fcntl(O_NONBLOCK)
+
+Playwright processLauncher.ts — spawn(browserPath, { stdio: 'pipe' }):
+  → Node.js child_process → libuv uv_pipe_open → fcntl(O_NONBLOCK)"""
+
+[[probes]]
+id = "i14_pipe2"
+category = "I"
+desc = "pipe2(O_CLOEXEC) 原子性管道创建 — spawn stdio 管道"
+bun = true
+playwright = true
+priority = "P1"
+impact = "pipe2 原子性地创建带 O_CLOEXEC 的管道，防止子进程继承不需要的 fd。不可用时需降级为 pipe()+fcntl(FD_CLOEXEC)，存在竞态窗口。"
+trigger_path = """
+Bun.spawn() & Playwright 浏览器 stdio:
+  → pipe2(fds, O_CLOEXEC) — 创建浏览器 stdin/stdout/stderr 管道
+  → Bun spawn_process.rs — pipe2() 原子创建 O_CLOEXEC 管道
+  → Node.js child_process → libuv uv__make_pipe() → pipe2(O_CLOEXEC)
+
+Playwright processLauncher.ts — 浏览器 stdio 捕获:
+  → pipe2() → dup2() 重定向到子进程 fd 0/1/2"""
+
+[[probes]]
+id = "i15_getsockname"
+category = "I"
+desc = "getsockname() socket 本地地址 — Playwright CDP 端口检测"
+bun = false
+playwright = true
+priority = "P2"
+impact = "Playwright 启动浏览器时分配随机端口，通过 getsockname 获取实际端口号。若被限制，无法获知 CDP 连接端口。"
+trigger_path = """
+Playwright CDP WebSocket 端口检测:
+  → browserType.launch() — 启动浏览器 → bind(port=0) 随机端口
+    → getsockname(fd, &addr, &len) — 获取内核分配的实际端口
+      → Playwright 读取端口 → ws://127.0.0.1:{port}/..."""
+
+[[probes]]
+id = "i16_dup2"
+category = "I"
+desc = "dup2() fd 重定向 — spawn 子进程 stdio 重定向"
+bun = true
+playwright = true
+priority = "P1"
+impact = "所有进程 spawn 操作依赖 dup2 重定向 stdin/stdout/stderr。若被限制，子进程 stdio 无法正确建立。"
+trigger_path = """
+Playwright & Bun 子进程 stdio 重定向:
+  → dup2(pipe_fd, STDIN_FILENO) / dup2(pipe_fd, STDOUT_FILENO)
+  → Node.js child_process → dup2() 在 fork/exec 之间设置子进程 stdio
+  → Bun spawn_process.rs — dup2() 建立子进程管道
+  → fspy_seccomp_unotify (vite-plus) — dup2() 虚拟文件系统 fd 替换"""
+
+[[probes]]
+id = "i17_openpty_libc"
+category = "I"
+desc = "openpty() 符号是否能从 libc.so / libutil.so 解析（dlsym）"
+bun = true
+priority = "P2"
+impact = "fork Terminal.rs 加 cfg(target_env='ohos') 直接 extern 'C' 链 libc 的 openpty，因 OHOS 无 libutil。若本探针只能从 libc.so 解析到 openpty，证明 fork 直接 link 是合理；若能从 libutil 解析，fork 分支可简化。"
+solution = "若仅 libc.so 可见，保持直接 extern 'C' 链路；否则可统一走 dlopen('libc.so')+dlsym。"
+trigger_path = """
+Bun Terminal openpty 动态加载:
+  → Terminal::get_open_pty_fn()                          src/runtime/api/bun/Terminal.rs:840
+    → dlopen('libutil.so' | 'libutil.so.1' | 'libc.so.6' | 'libc.so')
+      → dlsym(handle, 'openpty')"""
+
+[[probes]]
+id = "j1_ptrace_fb"
+category = "J"
+desc = "a3_ptrace 替代：SIGSEGV 自捕获 handler"
+bun = false
+verifies = "a3_ptrace"
+
+[[probes]]
+id = "j2_close_range_fb"
+category = "J"
+desc = "a10_close_range 替代：/proc/self/fd 枚举关闭"
+bun = false
+verifies = "a10_close_range"
+
+[[probes]]
+id = "j3_clone3_fb"
+category = "J"
+desc = "c3_clone3 替代：clone(2) + CLONE_PIDFD 等价路径"
+bun = false
+verifies = "c3_clone3"
+
+[[probes]]
+id = "j4_openat2_fb"
+category = "J"
+desc = "c4_openat2 替代：openat + O_NOFOLLOW + fstatat 路径段扫描"
+bun = false
+verifies = "c4_openat2"
+
+[[probes]]
+id = "j5_epoll_pwait2_fb"
+category = "J"
+desc = "c13_epoll_pwait2 替代：epoll_pwait + timerfd 亚毫秒精度"
+bun = false
+verifies = "c13_epoll_pwait2"
+
+[[probes]]
+id = "j6_tmpfile_fb"
+category = "J"
+desc = "g1_tmpfile 替代：mkstemp() 落到 $HOME / 沙箱基目录"
+bun = false
+verifies = "g1_tmpfile"
+
+[[probes]]
+id = "j7_data_local_tmp_fb"
+category = "J"
+desc = "i4_data_local_tmp 替代：fopen() 落到 $HOME / 沙箱 temp 目录"
+bun = false
+verifies = "i4_data_local_tmp"
+
+[[probes]]
+id = "j8_execveat_fb"
+category = "J"
+desc = "c1_execveat_sym 替代：syscall(SYS_execveat) 直接发起调用"
+bun = false
+verifies = "c1_execveat_sym"
+
+[[probes]]
+id = "j9_fanotify_fb"
+category = "J"
+desc = "e5_fanotify 替代：inotify 监听 IN_MODIFY 事件"
+bun = false
+verifies = "e5_fanotify"
+
+[[probes]]
+id = "j10_pthread_cancel_fb"
+category = "J"
+desc = "h1_pthread_cancel 替代：pthread_kill + 信号 handler + volatile flag"
+bun = false
+verifies = "h1_pthread_cancel"
+
+[[probes]]
+id = "j11_res_state_fb"
+category = "J"
+desc = "h4_res_state 替代：getaddrinfo() 替代 _res 全局状态"
+bun = false
+verifies = "h4_res_state"
+
+[[probes]]
+id = "j12_fchmodat2_fb"
+category = "J"
+desc = "c5_fchmodat2 替代：fchmodat() 降级（无 flags 支持）"
+bun = false
+verifies = "c5_fchmodat2"
+
+[[probes]]
+id = "c16_mknodat"
+category = "C"
+desc = "mknodat (33) 文件节点创建 — 通用内核能力（Bun/WebKit 未直接调用）"
+bun = true
+webkit = false
+nodejs = false
+priority = "P2"
+solution = "两端均已通过，mknodat 正常可用"
+
+[[probes]]
+id = "c17_bind"
+category = "C"
+desc = "bind (200) socket 绑定 — Bun uSockets bsd.c:910 libc bind() 调用路径"
+bun = true
+webkit = true
+nodejs = true
+priority = "P2"
+impact = "Bun HTTP/WebSocket 服务器启动时调用 bind() 绑定监听端口。uSockets bsd.c:910 及 h3blast.c:536 均使用 libc bind() 包装器。若被 seccomp 拦截则所有网络服务无法启动。"
+trigger_path = """
+Bun uSockets 网络栈
+  → bind(listenFd, listenAddr, listenAddrLength)              packages/bun-usockets/src/bsd.c:910
+    → libc bind() 包装函数
+      → syscall(SYS_bind=200, fd, addr, addrlen)
+        → seccomp filter → SIGSYS
+
+Bun HTTP/3 (QUIC)
+  → bind(fd, (struct sockaddr*)&local, llen)                   packages/h3blast/src/h3blast.c:536
+
+WebKit Remote Inspector
+  → ::bind(fdListen, (struct sockaddr*)&address,               Source/.../RemoteInspectorSocketPOSIX.cpp:111
+      sizeof(address))"""
+solution = "两端均已通过，libc bind() 及 __NR_bind 宏正常可用"
+
+[[probes]]
+id = "c18_ioctl"
+category = "C"
+desc = "ioctl (29) FICLONE raw syscall — Bun src/sys/lib.rs:5573 ioctl_ficlone() 调用路径"
+bun = true
+webkit = false
+nodejs = true
+priority = "P2"
+impact = "Bun fs.copyFile() 通过 ioctl_ficlone() 调用 raw syscall(SYS_ioctl, dest_fd, FICLONE, src_fd) 实现写时复制快速路径。被拦截时回退到 copy_file_range/sendfile/逐字节拷贝，大文件拷贝性能大幅下降。"
+trigger_path = """
+Bun fs.copyFile() FICLONE 快速路径
+  → ioctl_ficlone(dest_fd, src_fd)                              src/sys/lib.rs:5573
+    → libc::syscall(SYS_ioctl, dest_fd,                         libc crate
+        FICLONE=0x40049409, src_fd)
+      → seccomp filter → SIGSYS
+
+调用方:
+  → node_fs.rs:5295,5311,8729 — fs.copyFile()
+
+注：Bun 也大量使用 libc ioctl() 包装器（TIOCGWINSZ/TIOCSCTTY/
+TIOCGPTN/FIONREAD），但 raw syscall 路径仅 FICLONE 一处。"""
+solution = "两端均已通过，ioctl raw syscall (FICLONE) 及 __NR_ioctl 宏正常可用"
+
+[[probes]]
+id = "j13_seccomp_shim_fb"
+category = "J"
+desc = "a1_seccomp_unotify 替代：LD_PRELOAD shim 拦截 libc open() + RTLD_NEXT 转发"
+bun = false
+verifies = "a1_seccomp_unotify"
+
+# ============================================================================
+# K — 降级点回归检查
+#
+# 每条对应 ohos-bun (ohos-aarch64 分支) 或 ohos-compat-shim 里一处具体的
+# 能力型降级代码。guards 用内容锚（不是行号，行号会随上游 rebase 漂移）
+# 定位到具体代码；audit-coverage.py 用它做双向核对：① 降级代码是否都有
+# 探针盯着；② 探针盯的锚点是否还存在于代码里（消失了就该退役）。
+#
+# request_id / expected_version 是向鸿蒙 OS 团队提交的诉求编号与承诺放开
+# 版本，目前留空占位，由用户提供的诉求清单批量回填（见实施步骤 7）。
+# devmode_sensitive 由第一轮 devmode on/off 快照 diff 回填：
+#   on-only    = devmode 关闭后此降级新增/变得必需
+#   unaffected = devmode 开关不影响这条降级的结论
+#   unknown    = 尚未跑过 devmode-off 快照，无法判断（初始值）
+# ============================================================================
+
+[[probes]]
+id = "k1_exec_selfsigned_elf"
+category = "K"
+desc = "未签名/刚落盘的 ELF 拷贝能否 exec（不同于 l0/03：这份拷贝是全新 inode，模拟刚解包的产物）"
+bun = true
+priority = "P0"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：可以评估精简 ensure_signed() 在 exec 前的强制重签路径（仍需确认 devmode=off 下同样 pass，见 docs/harmony-ohos-porting-guide.md §5.2）"
+impact = "bun install 解包依赖、bun build --compile 产物落盘后首次 exec 的产物，在 ensure_signed() 兜底重签之前就是这个形状（全新 inode、未额外签名）。"
+trigger_path = "bun install 解包 / bun build --compile 落盘 → 首次 exec → ensure_signed() 兜底重签（spawn_sys/spawn_process.rs）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/spawn_sys/spawn_process.rs"
+anchor = "OHOS: kernel refuses to exec unsigned files"
+
+[[probes]]
+id = "k2_exec_shebang_script"
+category = "K"
+desc = "内核 binfmt_script 直接 execve() 一个 #! 脚本是否会被展开（不经过手工 shebang 解析兜底）"
+bun = true
+priority = "P1"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：可以删除 spawn_process.rs 里手工展开 shebang 的 'shim: 代码块，直接 execve 交给内核"
+impact = "OHOS_TEST_STATUS.md 记录的 run-extensionless.test.ts shebang exec 兜底为什么没生效，长期未查透；本探针把内核路径本身的可用性独立出来验证。"
+trigger_path = "bun run <script-with-shebang> / package.json bin 字段 → execve(script) → 内核 binfmt_script 应展开 → 失败则走手工 shebang 解析兜底（spawn_sys/spawn_process.rs）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/spawn_sys/spawn_process.rs"
+anchor = "Manually expand shebang here so exec targets"
+
+[[probes]]
+id = "k3_vfork"
+category = "K"
+desc = "vfork() 本身是否可用（ohos-bun 目前完全没有在 OHOS 上尝试过，直接跳到 fork()）"
+bun = true
+priority = "P2"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：可以让 OHOS 也走 vfork() 优先、fork() 兜底的路径（去掉 #if ... && !defined(__OHOS__) 的排除），减少自管道错误检测的开销"
+impact = "posix_spawn_bun() 在非 OHOS 的 Linux 分支用 vfork() 提速，OHOS 分支直接用更慢的 fork() + 自管道错误检测，这是一条从未在真机验证过的谨慎假设。"
+trigger_path = "Bun.spawn() / Bun.spawnSync() → posix_spawn_bun() → #if OS(LINUX) && !defined(__OHOS__) 才尝试 vfork()（jsc/bindings/bun-spawn.cpp）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/jsc/bindings/bun-spawn.cpp"
+anchor = "if vfork fails (e.g. blocked by seccomp on platforms like OHOS)"
+
+[[probes]]
+id = "k4_vfork_child_fcntl_cloexec"
+category = "K"
+desc = "vfork() 子进程里 fcntl(fd, F_SETFD, FD_CLOEXEC) 是否在随后的 execve() 里生效"
+bun = true
+priority = "P2"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：closeRangeOrLoop 排除 stdio fd 的特殊处理可以简化为普通 fcntl CLOEXEC 循环，不必再靠'排除 0,1,2 三个 fd'规避"
+impact = "bun-spawn.cpp 注释断言 OHOS 上 vfork 子进程内 fcntl(F_SETFD) 被忽略，从未有独立探针验证过；这条结论目前只在代码注释里，没有可重跑的证据。"
+trigger_path = "posix_spawn_bun() vfork 子进程 → closeRangeOrLoop() 逐个 fd 设 CLOEXEC（jsc/bindings/bun-spawn.cpp）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/jsc/bindings/bun-spawn.cpp"
+anchor = "On OHOS, fcntl(F_SETFD) is ignored in vfork children"
+
+[[probes]]
+id = "k5_open_oexec_xbit"
+category = "K"
+desc = "open(path, O_EXEC) 是否仍然不校验文件的可执行权限位（0660 文件应被拒绝却被放行）"
+bun = true
+priority = "P2"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：is_executable_file() 可以恢复用 open(O_EXEC) 判断，不必绕道 stat()+S_ISREG+access(X_OK)"
+impact = "is_executable_file() 在 OHOS 上因为这个内核 bug 被迫改用更迂回的 stat+access 组合判断可执行性。"
+trigger_path = "is_executable_file() 判断路径是否可执行 → #if defined(__OHOS__) 分支绕开 O_EXEC（jsc/bindings/c-bindings.cpp）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/jsc/bindings/c-bindings.cpp"
+anchor = "OHOS kernel bug: open(O_EXEC) doesn't check file x permission bit"
+
+[[probes]]
+id = "k6_statx_socket_fd"
+category = "K"
+desc = "statx(2) 对 socket-backed fd 是否仍然返回 EBADF（c7_statx 只测普通文件路径）"
+bun = true
+priority = "P2"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：sys/lib.rs 里 OHOS 专属的 EBADF fallback 特判可以删除，只保留通用的 ENOSYS/EOPNOTSUPP/EPERM/EINVAL 判据"
+impact = "statx 在通用文件路径上可用（见 c7_statx），但对 socket fd 的这个更具体的失败形状只有 OHOS 独有，需要单独的 errno 特判才能正确回退到 fstat。"
+trigger_path = "sys/lib.rs statx 包装 → 对 socket fd 调用返回 EBADF → cfg!(ohos) 特判折进 statx_fallback（sys/lib.rs:2358）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/sys/lib.rs"
+anchor = "OHOS's statx(2) rejects socket-backed fds with"
+
+[[probes]]
+id = "k7_rlimit_nofile_default"
+category = "K"
+desc = "RLIMIT_NOFILE 默认软上限是否仍然低于 163840（ohos-bun 强制拉高的阈值）"
+bun = true
+priority = "P2"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：resolver/lib.rs 里 musl/OHOS 专属的 163840 下限可以删除，直接用平台默认的 hard limit"
+impact = "adjust_ulimit() 目前对 musl/OHOS 强制把 RLIMIT_NOFILE 拉到至少 163840；如果平台默认值已经够高，这段特判就是死代码。"
+trigger_path = "启动早期 adjust_ulimit() → #[cfg(any(musl, ohos))] 强制 max(hard, 163840)（resolver/lib.rs:1035-1036）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/resolver/lib.rs"
+anchor = "musl/OHOS have extremely low defaults, so ensure at least 163840 there."
+
+[[probes]]
+id = "k8_tmp_readonly"
+category = "K"
+desc = "/tmp 是否仍然是只读 erofs（resolver.rs 的三级 TMPDIR 回落链的存在前提）"
+bun = true
+priority = "P1"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：resolver/lib.rs 的 /data/local/tmp → $HOME/tmp 回落链可以删除，直接用 /tmp"
+impact = "TMPDIR 解析目前要按 /tmp → /data/local/tmp → $HOME/tmp 顺序做运行时可写性探测；如果 /tmp 本身可写，前两级判断都是多余开销。"
+trigger_path = "TMPDIR 解析 → #[cfg(all(not(android), ohos))] 运行时探测 /tmp 可写性（resolver/lib.rs:1714）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/resolver/lib.rs"
+anchor = "OHOS /tmp is read-only erofs. Check writability at runtime"
+
+[[probes]]
+id = "k9_execonly_elf_read"
+category = "K"
+desc = "chmod 0111（无读位）的 ELF 能否通过 open(\"/proc/self/exe\") 读取自身"
+bun = true
+priority = "P2"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：可以删除 StandaloneModuleGraph.rs 里解析 /proc/self/maps 手工计算 PIE 装载基址的整段兜底逻辑，直接 open(/proc/self/exe) 读取 .bun 段"
+impact = "bun build --compile 产物读取自带的 .bun 载荷段时，若目标是 chmod 0111 的可执行文件，open(/proc/self/exe) 失败，必须靠解析 /proc/self/maps + 手工 ASLR 偏移计算才能定位数据。"
+trigger_path = "单体可执行文件启动读取 .bun 段 → open(/proc/self/exe) 失败 EACCES → 改读 /proc/self/maps 找 PIE 装载基址（standalone_graph/StandaloneModuleGraph.rs:588-612）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/standalone_graph/StandaloneModuleGraph.rs"
+anchor = "OHOS hmdfs denies"
+
+[[probes]]
+id = "k10_reflink_residue"
+category = "K"
+desc = "copy_file_range 克隆文件后不 ftruncate/fsync 直接覆写，独立 fd 读到的是否仍是新内容（而非残留的克隆数据）"
+bun = true
+priority = "P2"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：可以评估删除 StandaloneModuleGraph.rs 里 OHOS 专属的 ftruncate(fd,0) 和 fsync() 两处 workaround（建议先用真实的 EXDEV move_file_z_with_handle 路径复核，见 probe 注释里的范围说明）"
+impact = "bun build --compile 把修改后的 ELF 写回 copy_file_range 克隆出的临时文件时，靠这两处 workaround 避免'磁盘内容落后于页缓存'的竞态。"
+trigger_path = "StandaloneModuleGraph 写回 .bun 段 → copy_file_range 克隆 → #[cfg(ohos)] ftruncate(fd,0) 切断 COW → 写入 → #[cfg(ohos)] fsync 落盘（standalone_graph/StandaloneModuleGraph.rs:1756,1770）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/standalone_graph/StandaloneModuleGraph.rs"
+anchor = "Cut COW/reflink left by an earlier copy_file_range"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/standalone_graph/StandaloneModuleGraph.rs"
+anchor = "OHOS: fsync before move_file_z_with_handle, which uses"
+
+[[probes]]
+id = "k11_dlopen_unsigned_so"
+category = "K"
+desc = "内核是否仍然拒绝 dlopen() 一个 .codesign 段内容已失效（签名破坏）的 .so"
+bun = true
+priority = "P1"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：PackageInstaller.rs 安装期递归扫描并强制签名 .so/.node 的逻辑可以删除"
+impact = "bun install 装完带原生依赖的包后，要递归扫描所有 .so/.node 并逐个检查+补签，才能保证之后 dlopen 成功；这是安装耗时和复杂度的来源。"
+trigger_path = "bun install 装完包 → ohos_sign_native_binaries() 扫描 .so/.node → 未签名则 sign_selfsign_inplace()（install/PackageInstaller.rs:2524,2537）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/install/PackageInstaller.rs"
+anchor = "The OHOS kernel refuses to `dlopen`"
+
+[[probes]]
+id = "k12_bind_privileged_port"
+category = "K"
+desc = "不带 CAP_NET_BIND_SERVICE 时能否 bind() 特权端口（<1024）"
+bun = true
+priority = "P2"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若长期 pass：OHOS_TEST_STATUS.md 里 cluster 特权端口这条硬限制可以从'平台层面硬限制'移到已解除清单"
+impact = "Bun cluster 模块的特权端口监听（如 80/443）目前在这台设备上完全不可用，相关测试被跳过。"
+trigger_path = "net.Server.listen(<1024>) / cluster 主进程转发 fd → bind() → 缺 CAP_NET_BIND_SERVICE → EACCES"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "OHOS_TEST_STATUS.md"
+anchor = "cluster 特权端口绑定"
+
+[[probes]]
+id = "k13_getaddrinfo_netsys"
+category = "K"
+desc = "系统 getaddrinfo()（netsys IPC 私有通道）解析外部域名是否仍然可用"
+bun = true
+priority = "P1"
+request_id = ""
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若持续 fail 而 devmode=on 时 pass：说明 netsys 访问权限被 devmode 状态门控，需要单独向鸿蒙团队提交'非开发者模式下 netsys IPC 通道保持可达'的诉求；若两态都 pass 可以不必理会"
+impact = "dns.lookup 在 OHOS/Android 上完全依赖系统 getaddrinfo，没有 Bun 自己的用户态 DNS 客户端兜底；一旦 netsys 不可达，DNS 解析没有备选路径。"
+trigger_path = "dns.lookup 默认路径 → #[cfg(any(android, ohos))] 使用系统 getaddrinfo（dns/lib.rs:281-294）"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/dns/lib.rs"
+anchor = "OHOS: system getaddrinfo resolves via netsys IPC (private channel,"
+
+[[probes]]
+id = "k14_anon_rwx_mmap_jit"
+category = "K"
+desc = "匿名 RWX mmap 是否可分配且可执行 —— JSC JIT（含 bun:ffi）成立的前提"
+bun = true
+priority = "P1"
+request_id = "social4hyq/homebrew-core#1"
+expected_version = ""
+devmode_sensitive = "unknown"
+retire = "若 devmode=off 快照仍然 pass：说明 issue #1 报告的商用机并非'devmode 关闭导致的匿名 RWX 拒绝'这一类，需要回头找报告者要更多设备信息（芯片/固件/是否企业证书分发）；若 fail，坐实 devmode 开关直接决定 JIT 可用性，可作为回复 issue 的证据"
+impact = "opencode 等依赖 @ohos-npm-ports/opentui-core 的 TUI 应用经 bun:ffi 加载原生渲染库；一旦此探针 fail，JSC::VM::computeCanUseJIT() 会让 JSC::Options::useJIT() 落定为 false，JSFFIFunction::create()/FFI::createCallback() 在构造阶段直接抛 TypeError('bun:ffi requires the JIT')，无解释执行 fallback（N-API 走 VM::getHostFunction() 的 LLInt 路径不受影响）。"
+trigger_path = "opentui-core loadBackend() → createBunBackend → bun:ffi dlopen()/JSCallback → JSC::JSFFIFunction::create()"
+[[probes.guards]]
+repo = "ohos-bun"
+path = "src/jsc/bindings/JSCFFIBridge.cpp"
+anchor = "JSC::JSFFIFunction* function = JSC::JSFFIFunction::create(vm, globalObject, globalObject->ffiFunctionStructure()"

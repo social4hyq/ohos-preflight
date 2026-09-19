@@ -1,0 +1,16 @@
+.claude/settings.local.json
+.claude/settings.json
+
+# Ignore compiled probe binaries (no extension) and build artifacts
+probes/*
+!probes/*.c
+!probes/*.sh
+!probes/*.toml
+!probes/*/
+
+# Ignore generated reports and Python cache
+# reports/ 在发布仓纳入版本管理（源仓忽略）
+__pycache__/
+
+# Ignore per-run snapshot.sh output (devmode on/off comparison data)
+snapshots/
